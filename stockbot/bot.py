@@ -929,9 +929,9 @@ async def button_handler(
     elif text == "📰 أخبار الشركة":
 
         await update.message.reply_text(
-            "📰 اكتب:n"
-            "/news AAPL n"
-            "مثال آخر:n"
+            "📰 اكتب:\n\n"
+            "n AAPL\n\n"
+            "مثال آخر:\n"
             "n TSLA"
         )
 
@@ -975,6 +975,32 @@ async def handle_message(
         await earnings_shortcut(
             update,
             context
+        )
+
+        return
+
+    # n AAPL
+    if text.lower().startswith("n "):
+
+        parts = text.split()
+
+        if len(parts) != 2:
+            await update.message.reply_text(
+                "اكتب:\nn AAPL"
+            )
+            return
+
+        symbol = parts[1].upper()
+
+        message = await update.message.reply_text(
+            f"📰 جاري جلب أخبار {symbol}..."
+        )
+
+        result = get_news(symbol)
+
+        await message.edit_text(
+            result,
+            disable_web_page_preview=True
         )
 
         return
@@ -1113,4 +1139,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
