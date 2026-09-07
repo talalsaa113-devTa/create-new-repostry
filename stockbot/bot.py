@@ -929,10 +929,10 @@ async def button_handler(
     elif text == "📰 أخبار الشركة":
 
         await update.message.reply_text(
-            "📰 اكتب:\n\n"
-            "/news AAPL\n\n"
-            "مثال آخر:\n"
-            "/news TSLA"
+            "📰 اكتب:n"
+            "/news AAPL n"
+            "مثال آخر:n"
+            "n TSLA"
         )
 
     elif text == "🔔 تنبيه":
