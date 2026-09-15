@@ -2,838 +2,241 @@ import logging
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters
-)
-
-# ============================================================
-# إعداد التسجيل
-# ============================================================
-
+# إعداد التسجيل لمتابعة الأخطاء
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
-
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# التوكن
+# الإعدادات الخاصة بك
 # ============================================================
+TOKEN = "8634652596:AAGs4bPIGYV-aHMcTh6Xv_cU2WKLofKL1Io"
+MY_CHAT_ID = "1718922948"
 
-# مهم: ضع التوكن الجديد هنا
-TOKEN = "YOUR_NEW_BOT_TOKEN"
-
-
-# ============================================================
-# القائمة الرئيسية
-# ============================================================
-
-def main_menu():
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "💰 الأرباح",
-                callback_data="earnings"
-            ),
-            InlineKeyboardButton(
-                "📊 تحليل السهم",
-                callback_data="analysis"
-            )
-        ]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
+# قاموس مؤقت لتخزين حالة كل مستخدم (هل ضغط زر تحليل أو زر أرباح)
+user_states = {}
 
 # ============================================================
-# RSI
+# الدوال المساعدة للتحليل الفني والأرباح والأوبشن
 # ============================================================
 
 def calculate_rsi(close, window=14):
-
     delta = close.diff()
-
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-
-    avg_gain = gain.rolling(window).mean()
-    avg_loss = loss.rolling(window).mean()
-
-    rs = avg_gain / avg_loss
-
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    rs = gain / loss
     return 100 - (100 / (1 + rs))
 
+def calculate_macd(close, slow=26, fast=12, signal=9):
+    exp1 = close.ewm(span=fast, adjust=False).mean()
+    exp2 = close.ewm(span=slow, adjust=False).mean()
+    macd = exp1 - exp2
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    return macd, signal_line
 
-# ============================================================
-# MACD
-# ============================================================
-
-def calculate_macd(close):
-
-    ema12 = close.ewm(
-        span=12,
-        adjust=False
-    ).mean()
-
-    ema26 = close.ewm(
-        span=26,
-        adjust=False
-    ).mean()
-
-    macd = ema12 - ema26
-
-    signal = macd.ewm(
-        span=9,
-        adjust=False
-    ).mean()
-
-    return macd, signal
-
-
-# ============================================================
-# الدعم والمقاومة
-# ============================================================
-
-def get_support_resistance(data, price):
-
-    highs = data["High"].tail(30)
-    lows = data["Low"].tail(30)
-
-    supports = sorted(
-        [float(x) for x in lows if x < price],
-        reverse=True
-    )[:3]
-
-    resistances = sorted(
-        [float(x) for x in highs if x > price]
-    )[:3]
-
+def get_support_resistance(data, current_price):
+    highs = data['High'].tail(30)
+    lows = data['Low'].tail(30)
+    supports = sorted([float(x) for x in lows if x < current_price], reverse=True)[:3]
+    resistances = sorted([float(x) for x in highs if x > current_price])[:3]
     return supports, resistances
 
+def get_options_data(ticker, price):
+    try:
+        options_dates = ticker.options
+        if options_dates:
+            expiry = options_dates[0]
+            opt_chain = ticker.option_chain(expiry)
+            calls = opt_chain.calls
+            puts = opt_chain.puts
+            itm_calls = calls[calls['strike'] > price]
+            call_text = f"🟢 Call | Strike: ${itm_calls.iloc[0]['strike']} | Ask: ${itm_calls.iloc[0].get('ask', 0)}" if not itm_calls.empty else "🟢 Call | غير متوفر"
+            itm_puts = puts[puts['strike'] < price]
+            put_text = f"🔴 Put | Strike: ${itm_puts.iloc[-1]['strike']} | Ask: ${itm_puts.iloc[-1].get('ask', 0)}" if not itm_puts.empty else "🔴 Put | غير متوفر"
+            return f"📊 **عقود الخيارات (تاريخ: {expiry}):**\n{call_text}\n{put_text}"
+    except Exception:
+        pass
+    return "📊 عقود الخيارات: غير متوفرة حالياً."
+
+def get_earnings_full(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        calendar = ticker.calendar
+        next_earnings_date = "غير متوفر"
+        if calendar is not None and not isinstance(calendar, dict):
+            try:
+                if 'Earnings Date' in calendar and len(calendar['Earnings Date']) > 0:
+                    next_earnings_date = str(calendar['Earnings Date'][0]).split()[0]
+            except:
+                pass
+        elif isinstance(calendar, dict):
+            if 'Earnings Date' in calendar and len(calendar['Earnings Date']) > 0:
+                next_earnings_date = str(calendar['Earnings Date'][0]).split()[0]
+
+        q_earnings = ticker.quarterly_earnings
+        earnings_history = ""
+        if q_earnings is not None and not q_earnings.empty:
+            last_4 = q_earnings.tail(4)
+            earnings_history = "📈 **آخر أرباح للشركة (آخر 4 أرباع):**\n"
+            for idx, row in last_4.iterrows():
+                rev = row.get('Revenue', 'N/A')
+                earnings_history += f"• {str(idx)[:10]} | الإيرادات: {rev:,} $\n" if isinstance(rev, (int, float)) else f"• {str(idx)[:10]} | البيانات متاحة\n"
+        else:
+            earnings_history = "📈 آخر أرباح للشركة: غير متوفرة حالياً."
+
+        return f"""
+📑 **تقرير أرباح الشركة لـ {symbol}**
+
+📅 **موعد الأرباح القادم:** {next_earnings_date}
+
+{earnings_history}
+"""
+    except Exception as e:
+        logger.error(f"Error fetching earnings for {symbol}: {e}")
+        return f"❌ حدث خطأ أثناء جلب أرباح الشركة `{symbol}`."
 
 # ============================================================
-# تحليل السهم
+# دالة تحليل السهم الشاملة
 # ============================================================
 
 def analyze_stock(symbol):
-
     symbol = symbol.upper().strip()
-
     try:
-
         ticker = yf.Ticker(symbol)
-
-        data = ticker.history(
-            period="6mo",
-            interval="1d",
-            auto_adjust=False
-        )
-
+        data = ticker.history(period="6mo", interval="1d")
         if data.empty or len(data) < 50:
+            return None
 
-            return (
-                f"❌ لم أجد بيانات كافية للسهم "
-                f"`{symbol}`."
-            )
-
-        close = data["Close"].dropna()
-
-        # السعر الحالي
+        close = data["Close"]
         price = float(close.iloc[-1])
-
-        # السعر السابق
         previous = float(close.iloc[-2])
+        change = ((price - previous) / previous) * 100
 
-        change = (
-            (price - previous)
-            / previous
-        ) * 100
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        ma50 = float(close.rolling(50).mean().iloc[-1])
 
-        # المتوسطات
-        ma20 = float(
-            close.rolling(20).mean().iloc[-1]
-        )
-
-        ma50 = float(
-            close.rolling(50).mean().iloc[-1]
-        )
-
-        # RSI
         rsi = calculate_rsi(close)
+        rsi_value = float(rsi.iloc[-1])
+        rsi_status = "🟢 تشبع بيع" if rsi_value < 30 else ("🔴 تشبع شراء" if rsi_value > 70 else "⚪ طبيعي")
 
-        rsi_value = float(
-            rsi.iloc[-1]
-        )
-
-        if rsi_value >= 70:
-
-            rsi_status = "🔴 تشبع شراء"
-
-        elif rsi_value <= 30:
-
-            rsi_status = "🟢 تشبع بيع"
-
-        else:
-
-            rsi_status = "⚪ طبيعي"
-
-        # MACD
         macd, signal = calculate_macd(close)
+        macd_value, signal_value = float(macd.iloc[-1]), float(signal.iloc[-1])
+        macd_status = "🟢 إيجابي" if macd_value > signal_value else "🔴 سلبي"
 
-        macd_value = float(
-            macd.iloc[-1]
-        )
+        high30 = float(data["High"].tail(30).max())
+        low30 = float(data["Low"].tail(30).min())
+        trend = "🟢 صاعد" if price > ma20 > ma50 else ("🔴 هابط" if price < ma20 < ma50 else "🟡 متذبذب")
 
-        signal_value = float(
-            signal.iloc[-1]
-        )
+        supports, resistances = get_support_resistance(data, price)
+        score = sum([price > ma20, ma20 > ma50, macd_value > signal_value, 30 <= rsi_value <= 70, price > high30 * 0.97])
 
-        if macd_value > signal_value:
+        final_signal = "🟢 إيجابية" if score >= 4 else ("🔴 سلبية" if score <= 1 else "🟡 محايدة")
+        daily_change = f"🟢 +{change:.2f}%" if change > 0 else (f"🔴 {change:.2f}%" if change < 0 else "⚪ 0.00%")
 
-            macd_status = "🟢 إيجابي"
+        support_text = "".join([f"{i}️⃣ ${lvl:.2f} ({(lvl - price) / price * 100:.2f}%)\n" for i, lvl in enumerate(supports, start=1)]) if supports else "❌ لا يوجد دعم واضح.\n"
+        resistance_text = "".join([f"{i}️⃣ ${lvl:.2f} (+{(lvl - price) / price * 100:.2f}%)\n" for i, lvl in enumerate(resistances, start=1)]) if resistances else "❌ لا يوجد مقاومة واضحة.\n"
 
-        else:
-
-            macd_status = "🔴 سلبي"
-
-        # أعلى وأدنى 30 يوم
-        high30 = float(
-            data["High"].tail(30).max()
-        )
-
-        low30 = float(
-            data["Low"].tail(30).min()
-        )
-
-        # الاتجاه
-        if price > ma20 > ma50:
-
-            trend = "🟢 صاعد"
-
-        elif price < ma20 < ma50:
-
-            trend = "🔴 هابط"
-
-        else:
-
-            trend = "🟡 متذبذب"
-
-        # الدعم والمقاومة
-        supports, resistances = (
-            get_support_resistance(
-                data,
-                price
-            )
-        )
-
-        # ====================================================
-        # القوة
-        # ====================================================
-
-        score = 0
-
-        if price > ma20:
-            score += 1
-
-        if ma20 > ma50:
-            score += 1
-
-        if macd_value > signal_value:
-            score += 1
-
-        if 30 <= rsi_value <= 70:
-            score += 1
-
-        if price >= high30 * 0.97:
-            score += 1
-
-        # الإشارة
-        if score >= 4:
-
-            final_signal = "🟢 إيجابية"
-
-        elif score <= 1:
-
-            final_signal = "🔴 سلبية"
-
-        else:
-
-            final_signal = "🟡 محايدة"
-
-        # التغير
-        if change > 0:
-
-            daily_change = f"🟢 +{change:.2f}%"
-
-        elif change < 0:
-
-            daily_change = f"🔴 {change:.2f}%"
-
-        else:
-
-            daily_change = "⚪ 0.00%"
-
-        # ====================================================
-        # الدعوم
-        # ====================================================
-
-        if supports:
-
-            support_text = ""
-
-            for i, level in enumerate(
-                supports,
-                start=1
-            ):
-
-                distance = (
-                    (level - price)
-                    / price
-                ) * 100
-
-                support_text += (
-                    f"{i}️⃣ ${level:.2f} "
-                    f"({distance:.2f}%)\n"
-                )
-
-        else:
-
-            support_text = (
-                "❌ لا يوجد دعم واضح.\n"
-            )
-
-        # ====================================================
-        # المقاومات
-        # ====================================================
-
-        if resistances:
-
-            resistance_text = ""
-
-            for i, level in enumerate(
-                resistances,
-                start=1
-            ):
-
-                distance = (
-                    (level - price)
-                    / price
-                ) * 100
-
-                resistance_text += (
-                    f"{i}️⃣ ${level:.2f} "
-                    f"(+{distance:.2f}%)\n"
-                )
-
-        else:
-
-            resistance_text = (
-                "❌ لا توجد مقاومة واضحة.\n"
-            )
-
-        # ====================================================
-        # التقرير
-        # ====================================================
+        options_text = get_options_data(ticker, price)
 
         return f"""
-📊 **تحليل السهم: {symbol}**
-
+📊 تحليل السهم: {symbol}
 ━━━━━━━━━━━━━━━━━━
-
-💰 السعر الحالي:
-`${price:.2f}`
-
-📅 التغير اليومي:
-`{daily_change}`
-
-📈 الاتجاه:
-`{trend}`
-
+💰 السعر: ${price:.2f}
+📅 التغير: {daily_change}
+📈 الاتجاه: {trend}
 ━━━━━━━━━━━━━━━━━━
-
-📊 RSI:
-`{rsi_value:.1f}`
-
-الحالة:
-`{rsi_status}`
-
-📉 MACD:
-`{macd_status}`
-
+📊 RSI: {rsi_value:.1f} ({rsi_status})
+📉 MACD: {macd_status}
 ━━━━━━━━━━━━━━━━━━
-
-📏 MA20:
-`${ma20:.2f}`
-
-📏 MA50:
-`${ma50:.2f}`
-
+📏 MA20: ${ma20:.2f}
+📏 MA50: ${ma50:.2f}
 ━━━━━━━━━━━━━━━━━━
-
-🎯 أعلى 30 يوم:
-`${high30:.2f}`
-
-🎯 أدنى 30 يوم:
-`${low30:.2f}`
-
+🎯 أعلى 30 يوم: ${high30:.2f}
+🎯 أدنى 30 يوم: ${low30:.2f}
 ━━━━━━━━━━━━━━━━━━
-
-🛡️ **الدعوم:**
-
+🛡️ الدعوم:
 {support_text}
-
-🚧 **المقاومات:**
-
+🚧 المقاومات:
 {resistance_text}
-
 ━━━━━━━━━━━━━━━━━━
-
-🔔 الإشارة:
-`{final_signal}`
-
-⭐ القوة:
-`{score}/5`
-
+🔔 الإشارة: {final_signal}
+⭐ القوة: {score}/5
 ━━━━━━━━━━━━━━━━━━
-
+{options_text}
+━━━━━━━━━━━━━━━━━━
 ⚠️ تحليل آلي وليس توصية مالية.
 """
-
-
-# ============================================================
-# موعد الأرباح
-# ============================================================
-
-def get_next_earnings(ticker):
-
-    try:
-
-        calendar = ticker.calendar
-
-        if calendar is None:
-            return "غير متوفر"
-
-        if isinstance(calendar, pd.DataFrame):
-
-            if "Earnings Date" in calendar.index:
-
-                dates = calendar.loc[
-                    "Earnings Date"
-                ]
-
-                if isinstance(
-                    dates,
-                    pd.Series
-                ):
-
-                    if len(dates) > 0:
-
-                        return str(
-                            dates.iloc[0]
-                        ).split()[0]
-
-                return str(
-                    dates
-                ).split()[0]
-
-        return "غير متوفر"
-
     except Exception as e:
-
-        logger.error(
-            f"Earnings date error: {e}"
-        )
-
-        return "غير متوفر"
-
+        logger.error(f"Error analyzing {symbol}: {e}")
+        return None
 
 # ============================================================
-# الأرباح
+# واجهة الأزرار وأوامر البوت
 # ============================================================
 
-def get_earnings(symbol):
-
-    symbol = symbol.upper().strip()
-
-    try:
-
-        ticker = yf.Ticker(symbol)
-
-        # موعد الأرباح
-        next_date = get_next_earnings(
-            ticker
-        )
-
-        # ====================================================
-        # القوائم المالية
-        # ====================================================
-
-        income = ticker.quarterly_income_stmt
-
-        revenue_text = ""
-
-        if (
-            income is not None
-            and not income.empty
-        ):
-
-            revenue_row = None
-
-            for row in [
-                "Total Revenue",
-                "Operating Revenue",
-                "Revenue"
-            ]:
-
-                if row in income.index:
-
-                    revenue_row = row
-                    break
-
-            if revenue_row:
-
-                revenue_text = (
-                    "📈 **الإيرادات - آخر 4 أرباع:**\n\n"
-                )
-
-                values = income.loc[
-                    revenue_row
-                ].dropna().iloc[:4]
-
-                for date, value in values.items():
-
-                    revenue_text += (
-                        f"• {str(date)[:10]} | "
-                        f"${float(value):,.0f}\n"
-                    )
-
-            else:
-
-                revenue_text = (
-                    "📈 الإيرادات غير متوفرة."
-                )
-
-        else:
-
-            revenue_text = (
-                "📈 بيانات الأرباح غير متوفرة."
-            )
-
-        # ====================================================
-        # EPS
-        # ====================================================
-
-        eps_text = ""
-
-        try:
-
-            earnings_dates = (
-                ticker.get_earnings_dates(
-                    limit=8
-                )
-            )
-
-            if (
-                earnings_dates is not None
-                and not earnings_dates.empty
-            ):
-
-                eps_text = (
-                    "\n📊 **EPS - آخر النتائج:**\n\n"
-                )
-
-                count = 0
-
-                for date, row in earnings_dates.iterrows():
-
-                    actual = row.get(
-                        "Reported EPS",
-                        np.nan
-                    )
-
-                    estimate = row.get(
-                        "EPS Estimate",
-                        np.nan
-                    )
-
-                    if pd.notna(actual):
-
-                        eps_text += (
-                            f"• {str(date)[:10]} | "
-                            f"Actual: {actual}"
-                        )
-
-                        if pd.notna(estimate):
-
-                            eps_text += (
-                                f" | Estimate: "
-                                f"{estimate}"
-                            )
-
-                        eps_text += "\n"
-
-                        count += 1
-
-                    if count >= 4:
-                        break
-
-        except Exception as e:
-
-            logger.error(
-                f"EPS error: {e}"
-            )
-
-        # ====================================================
-        # التقرير النهائي
-        # ====================================================
-
-        return f"""
-💰 **تقرير أرباح: {symbol}**
-
-━━━━━━━━━━━━━━━━━━
-
-📅 موعد الأرباح القادم:
-
-`{next_date}`
-
-━━━━━━━━━━━━━━━━━━
-
-{revenue_text}
-
-{eps_text}
-
-━━━━━━━━━━━━━━━━━━
-
-⚠️ البيانات يتم جلبها آلياً.
-"""
-
-    except Exception as e:
-
-        logger.error(
-            f"Earnings error {symbol}: {e}"
-        )
-
-        return (
-            f"❌ لم أتمكن من جلب أرباح "
-            f"`{symbol}`.\n\n"
-            f"تأكد من رمز السهم."
-        )
-
-
-# ============================================================
-# START
-# ============================================================
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    context.user_data["mode"] = None
-
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        ["📊 تحليل سهم", "💰 الأرباح"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "👋 **أهلاً بك**\n\n"
-        "اختر الخدمة التي تريدها:",
-        reply_markup=main_menu()
+        "أهلاً بك! استخدم الأزرار بالأسفل للتحكم:",
+        reply_markup=reply_markup
     )
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    user_id = update.message.from_user.id
+    
+    # 1. إذا ضغط المستخدم على زر "📊 تحليل سهم"
+    if text == "📊 تحليل سهم":
+        user_states[user_id] = "WAITING_FOR_STOCK"
+        await update.message.reply_text("📥 حسناً، أرسل الآن رمز السهم الذي تريد تحليله (مثل: AAPL):")
+        return
 
-# ============================================================
-# الضغط على الأزرار
-# ============================================================
+    # 2. إذا ضغط المستخدم على زر "💰 الأرباح"
+    elif text == "💰 الأرباح":
+        user_states[user_id] = "WAITING_FOR_EARNINGS"
+        await update.message.reply_text("📥 حسناً، أرسل رمز السهم متبوعاً بحرف E (مثل: AAPL E) لعرض الأرباح:")
+        return
 
-async def button_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+    # 3. معالجة الرمز بناءً على الزر الذي تم ضغطه سابقاً أو الكتابة المباشرة
+    current_state = user_states.get(user_id)
 
-    query = update.callback_query
-
-    await query.answer()
-
-    # ========================================================
-    # الأرباح
-    # ========================================================
-
-    if query.data == "earnings":
-
-        context.user_data["mode"] = "earnings"
-
-        await query.message.reply_text(
-            "💰 **الأرباح**\n\n"
-            "📩 أرسل رمز السهم بهذه الصيغة:\n\n"
-            "`E NVDA`\n\n"
-            "مثال آخر:\n"
-            "`E AAPL`"
-        )
-
-    # ========================================================
-    # تحليل السهم
-    # ========================================================
-
-    elif query.data == "analysis":
-
-        context.user_data["mode"] = "analysis"
-
-        await query.message.reply_text(
-            "📊 **تحليل السهم**\n\n"
-            "📩 أرسل رمز السهم فقط:\n\n"
-            "`NVDA`\n\n"
-            "مثال آخر:\n"
-            "`AAPL`"
-        )
-
-
-# ============================================================
-# استقبال الرسائل
-# ============================================================
-
-async def handle_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    text = update.message.text.strip().upper()
-
-    mode = context.user_data.get(
-        "mode"
-    )
-
-    # ========================================================
-    # وضع الأرباح
-    # ========================================================
-
-    if mode == "earnings":
-
-        # يجب أن تكون الصيغة E NVDA
-        parts = text.split()
-
-        if (
-            len(parts) != 2
-            or parts[0] != "E"
-            or not parts[1].isalpha()
-        ):
-
-            await update.message.reply_text(
-                "⚠️ الصيغة غير صحيحة.\n\n"
-                "أرسلها بهذا الشكل:\n"
-                "`E NVDA`"
-            )
-
-            return
-
-        symbol = parts[1]
-
-        wait_msg = await update.message.reply_text(
-            f"⏳ جاري جلب أرباح `{symbol}`..."
-        )
-
-        result = get_earnings(symbol)
-
-        await wait_msg.edit_text(
-            result,
-            reply_markup=main_menu()
-        )
-
-        context.user_data["mode"] = None
-
-    # ========================================================
-    # وضع تحليل السهم
-    # ========================================================
-
-    elif mode == "analysis":
-
-        # يجب أن يكون رمز السهم فقط
-        if (
-            not text.isalpha()
-            or len(text) > 6
-        ):
-
-            await update.message.reply_text(
-                "⚠️ أرسل رمز السهم فقط.\n\n"
-                "مثال:\n"
-                "`NVDA`"
-            )
-
-            return
-
-        symbol = text
-
-        wait_msg = await update.message.reply_text(
-            f"⏳ جاري تحليل `{symbol}`..."
-        )
-
+    # إذا كان في وضع تحليل السهم أو كتب الرمز مباشرة
+    if current_state == "WAITING_FOR_STOCK" or (text.isalpha() and len(text) <= 5):
+        symbol = text.upper()
+        user_states[user_id] = None # إعادة تعيين الحالة
+        wait_msg = await update.message.reply_text(f"🔍 جاري تحليل السهم `{symbol}` مع عقود الخيارات...")
         result = analyze_stock(symbol)
+        if result:
+            await wait_msg.edit_text(result)
+        else:
+            await wait_msg.edit_text(f"❌ عذراً، لم أتمكن من العثور على بيانات للسهم `{symbol}`.")
 
-        await wait_msg.edit_text(
-            result,
-            reply_markup=main_menu()
-        )
-
-        context.user_data["mode"] = None
-
-    # ========================================================
-    # لا يوجد اختيار
-    # ========================================================
-
+    # إذا كان في وضع الأرباح أو كتب الرمز منتهي بـ E
+    elif current_state == "WAITING_FOR_EARNINGS" or text.upper().endswith("E"):
+        clean_text = text.upper().replace("E", "").strip()
+        user_states[user_id] = None # إعادة تعيين الحالة
+        wait_msg = await update.message.reply_text(f"⏳ جاري جلب أرباح الشركة `{clean_text}`...")
+        result = get_earnings_full(clean_text)
+        await wait_msg.edit_text(result)
+        
     else:
-
-        await update.message.reply_text(
-            "اختر الخدمة أولاً:",
-            reply_markup=main_menu()
-        )
-
-
-# ============================================================
-# تشغيل البوت
-# ============================================================
+        await update.message.reply_text("⚠️ يرجى الضغط على إحدى الأزرار بالأسفل (📊 تحليل سهم أو 💰 الأرباح) ثم إرسال رمز السهم.")
 
 def main():
+    app = ApplicationBuilder().token(TOKEN).build()
 
-    app = (
-        ApplicationBuilder()
-        .token(TOKEN)
-        .build()
-    )
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    # Start
-    app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
-    )
-
-    # الأزرار
-    app.add_handler(
-        CallbackQueryHandler(
-            button_handler
-        )
-    )
-
-    # الرسائل
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & (~filters.COMMAND),
-            handle_message
-        )
-    )
-
-    print(
-        "🤖 البوت يعمل بنجاح..."
-    )
-
+    print("🤖 البوت يعمل بكامل الأزرار والشروط الآن...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
