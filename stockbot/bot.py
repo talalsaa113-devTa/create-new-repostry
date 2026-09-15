@@ -18,7 +18,7 @@ TOKEN = "8634652596:AAGs4bPIGYV-aHMcTh6Xv_cU2WKLofKL1Io"
 MY_CHAT_ID = "1718922948"
 
 # ============================================================
-# الدوال المساعدة للتحليل الفني
+# الدوال المساعدة للتحليل الفني والأرباح والأوبشن
 # ============================================================
 
 def calculate_rsi(close, window=14):
@@ -44,47 +44,33 @@ def get_support_resistance(data, current_price):
     
     return supports, resistances
 
-def get_options_and_earnings(symbol, price, supports, resistances):
+def get_options_data(ticker, price):
     try:
-        ticker = yf.Ticker(symbol)
-        
-        # --- 1. خيارات الأوبشن (Call / Put) ---
         options_dates = ticker.options
-        options_text = ""
         if options_dates:
-            # أخذ أقرب تاريخ استحقاق متوفر
             expiry = options_dates[0]
             opt_chain = ticker.option_chain(expiry)
             calls = opt_chain.calls
             puts = opt_chain.puts
             
-            # اختيار عقد Call قريب من السعر (أقرب Strike أعلى من السعر الحالي)
             itm_calls = calls[calls['strike'] > price]
-            if not itm_calls.empty:
-                best_call = itm_calls.iloc[0]
-                call_text = f"🟢 Call | Strike: ${best_call['strike']} | Ask: ${best_call.get('ask', 0)}"
-            else:
-                call_text = "🟢 Call | غير متوفر حالياً"
+            call_text = f"🟢 Call | Strike: ${itm_calls.iloc[0]['strike']} | Ask: ${itm_calls.iloc[0].get('ask', 0)}" if not itm_calls.empty else "🟢 Call | غير متوفر"
                 
-            # اختيار عقد Put قريب من السعر (أقرب Strike أقل من السعر الحالي)
             itm_puts = puts[puts['strike'] < price]
-            if not itm_puts.empty:
-                best_put = itm_puts.iloc[-1]
-                put_text = f"🔴 Put | Strike: ${best_put['strike']} | Ask: ${best_put.get('ask', 0)}"
-            else:
-                put_text = "🔴 Put | غير متوفر حالياً"
+            put_text = f"🔴 Put | Strike: ${itm_puts.iloc[-1]['strike']} | Ask: ${itm_puts.iloc[-1].get('ask', 0)}" if not itm_puts.empty else "🔴 Put | غير متوفر"
                 
-            options_text = f"📊 **عقود الخيارات (تاريخ: {expiry}):**\n{call_text}\n{put_text}"
-        else:
-            options_text = "📊 عقود الخيارات: غير متوفرة لهذا السهم حالياً."
+            return f"📊 **عقود الخيارات (تاريخ: {expiry}):**\n{call_text}\n{put_text}"
+    except Exception:
+        pass
+    return "📊 عقود الخيارات: غير متوفرة حالياً."
 
-        # --- 2. أرباح الشركة (آخر 4 أرباع وموعد الإعلان القادم) ---
-        earnings_text = ""
+def get_earnings_full(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
         calendar = ticker.calendar
         next_earnings_date = "غير متوفر"
         
         if calendar is not None and not isinstance(calendar, dict):
-            # محاولة استخراج تاريخ الأرباح القادم إذا وُجد في الجدول
             try:
                 if 'Earnings Date' in calendar:
                     dates = calendar['Earnings Date']
@@ -98,7 +84,6 @@ def get_options_and_earnings(symbol, price, supports, resistances):
                 if len(dates) > 0:
                     next_earnings_date = str(dates[0]).split()[0]
 
-        # جلب تاريخ آخر الأرباح (Quarterly Earnings)
         q_earnings = ticker.quarterly_earnings
         earnings_history = ""
         if q_earnings is not None and not q_earnings.empty:
@@ -106,183 +91,93 @@ def get_options_and_earnings(symbol, price, supports, resistances):
             earnings_history = "📈 **آخر أرباح للشركة (آخر 4 أرباع):**\n"
             for idx, row in last_4.iterrows():
                 rev = row.get('Revenue', 'N/A')
-                earn = row.get('Earnings', 'N/A')
-                # تنسيق الأرقام بشكل مبسط إن وجدت
                 earnings_history += f"• {str(idx)[:10]} | الإيرادات: {rev:,} $\n" if isinstance(rev, (int, float)) else f"• {str(idx)[:10]} | البيانات متاحة\n"
         else:
             earnings_history = "📈 آخر أرباح للشركة: غير متوفرة حالياً."
 
-        full_extra_info = f"""
-{options_text}
+        return f"""
+📑 **تقرير أرباح الشركة لـ {symbol}**
 
 📅 **موعد الأرباح القادم:** {next_earnings_date}
 
 {earnings_history}
 """
-        return full_extra_info
     except Exception as e:
-        logger.error(f"Error fetching options/earnings for {symbol}: {e}")
-        return "📊 بيانات الخيارات والأرباح غير متاحة مؤقتاً."
+        logger.error(f"Error fetching earnings for {symbol}: {e}")
+        return f"❌ حدث خطأ أثناء جلب أرباح الشركة `{symbol}`."
+
+def get_earnings_note(symbol):
+    # خيار حرف N (معلومات أو ملاحظات الأرباح السريعة)
+    try:
+        ticker = yf.Ticker(symbol)
+        calendar = ticker.calendar
+        next_date = "غير متوفر"
+        if calendar is not None and not isinstance(calendar, dict):
+            if 'Earnings Date' in calendar and len(calendar['Earnings Date']) > 0:
+                next_date = str(calendar['Earnings Date'][0]).split()[0]
+        elif isinstance(calendar, dict):
+            if 'Earnings Date' in calendar and len(calendar['Earnings Date']) > 0:
+                next_date = str(calendar['Earnings Date'][0]).split()[0]
+                
+        return f"📌 **ملاحظة أرباح `{symbol}`:**\n📅 موعد الإعلان القادم المتوقع: `{next_date}`\n💡 أرسل `{symbol}E` لعرض تفاصيل آخر 4 أرباع."
+    except Exception:
+        return f"📌 ملاحظة أرباح `{symbol}` غير متوفرة حالياً."
 
 # ============================================================
-# دالة تحليل السهم - شاملة
+# دالة تحليل السهم الشاملة (وتحتوي على الأوبشن)
 # ============================================================
 
 def analyze_stock(symbol):
     symbol = symbol.upper().strip()
 
     try:
-        data = yf.Ticker(symbol).history(
-            period="6mo",
-            interval="1d"
-        )
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period="6mo", interval="1d")
 
         if data.empty or len(data) < 50:
             return None
 
         close = data["Close"]
-
         price = float(close.iloc[-1])
         previous = float(close.iloc[-2])
+        change = ((price - previous) / previous) * 100
 
-        change = (
-            (price - previous)
-            / previous
-        ) * 100
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        ma50 = float(close.rolling(50).mean().iloc[-1])
 
-        ma20 = float(
-            close.rolling(20).mean().iloc[-1]
-        )
-
-        ma50 = float(
-            close.rolling(50).mean().iloc[-1]
-        )
-
-        # RSI
         rsi = calculate_rsi(close)
         rsi_value = float(rsi.iloc[-1])
+        rsi_status = "🟢 تشبع بيع" if rsi_value < 30 else ("🔴 تشبع شراء" if rsi_value > 70 else "⚪ طبيعي")
 
-        if rsi_value < 30:
-            rsi_status = "🟢 تشبع بيع"
-        elif rsi_value > 70:
-            rsi_status = "🔴 تشبع شراء"
-        else:
-            rsi_status = "⚪ طبيعي"
-
-        # MACD
         macd, signal = calculate_macd(close)
-        macd_value = float(macd.iloc[-1])
-        signal_value = float(signal.iloc[-1])
+        macd_value, signal_value = float(macd.iloc[-1]), float(signal.iloc[-1])
+        macd_status = "🟢 إيجابي" if macd_value > signal_value else "🔴 سلبي"
 
-        if macd_value > signal_value:
-            macd_status = "🟢 إيجابي"
-        else:
-            macd_status = "🔴 سلبي"
+        high30 = float(data["High"].tail(30).max())
+        low30 = float(data["Low"].tail(30).min())
 
-        # أعلى وأدنى 30 يوم
-        high30 = float(
-            data["High"].tail(30).max()
-        )
-        low30 = float(
-            data["Low"].tail(30).min()
-        )
+        trend = "🟢 صاعد" if price > ma20 > ma50 else ("🔴 هابط" if price < ma20 < ma50 else "🟡 متذبذب")
 
-        # الاتجاه
-        if price > ma20 > ma50:
-            trend = "🟢 صاعد"
-        elif price < ma20 < ma50:
-            trend = "🔴 هابط"
-        else:
-            trend = "🟡 متذبذب"
+        supports, resistances = get_support_resistance(data, price)
 
-        # الدعم والمقاومة
-        supports, resistances = get_support_resistance(
-            data,
-            price
-        )
-
-        # الإشارة
         score = 0
+        if price > ma20: score += 1
+        if ma20 > ma50: score += 1
+        if macd_value > signal_value: score += 1
+        if 30 <= rsi_value <= 70: score += 1
+        if price > high30 * 0.97: score += 1
 
-        if price > ma20:
-            score += 1
-        if ma20 > ma50:
-            score += 1
-        if macd_value > signal_value:
-            score += 1
-        if 30 <= rsi_value <= 70:
-            score += 1
-        if price > high30 * 0.97:
-            score += 1
+        final_signal = "🟢 إيجابية" if score >= 4 else ("🔴 سلبية" if score <= 1 else "🟡 محايدة")
+        daily_change = f"🟢 +{change:.2f}%" if change > 0 else (f"🔴 {change:.2f}%" if change < 0 else "⚪ 0.00%")
 
-        if score >= 4:
-            final_signal = "🟢 إيجابية"
-        elif score <= 1:
-            final_signal = "🔴 سلبية"
-        else:
-            final_signal = "🟡 محايدة"
+        support_text = "".join([f"{i}️⃣ ${lvl:.2f} ({(lvl - price) / price * 100:.2f}%)\n" for i, lvl in enumerate(supports, start=1)]) if supports else "❌ لا يوجد دعم واضح.\n"
+        resistance_text = "".join([f"{i}️⃣ ${lvl:.2f} (+{(lvl - price) / price * 100:.2f}%)\n" for i, lvl in enumerate(resistances, start=1)]) if resistances else "❌ لا يوجد مقاومة واضحة.\n"
 
-        # التغير اليومي
-        if change > 0:
-            daily_change = f"🟢 +{change:.2f}%"
-        elif change < 0:
-            daily_change = f"🔴 {change:.2f}%"
-        else:
-            daily_change = "⚪ 0.00%"
-
-        # الدعوم
-        if supports:
-            support_text = ""
-            for i, level in enumerate(supports, start=1):
-                distance = ((level - price) / price) * 100
-                support_text += f"{i}️⃣ ${level:.2f} ({distance:.2f}%)\n"
-            nearest_support = supports[0]
-        else:
-            support_text = "❌ لا يوجد مستوى دعم واضح.\n"
-            nearest_support = None
-
-        # المقاومات
-        if resistances:
-            resistance_text = ""
-            for i, level in enumerate(resistances, start=1):
-                distance = ((level - price) / price) * 100
-                resistance_text += f"{i}️⃣ ${level:.2f} (+{distance:.2f}%)\n"
-            nearest_resistance = resistances[0]
-        else:
-            resistance_text = "❌ لا يوجد مستوى مقاومة واضح.\n"
-            nearest_resistance = None
-
-        # السيناريو القادم
-        scenario = ""
-        if nearest_resistance is not None and nearest_support is not None:
-            resistance_distance = ((nearest_resistance - price) / price) * 100
-            support_distance = ((nearest_support - price) / price) * 100
-
-            if trend == "🟢 صاعد":
-                if len(resistances) > 1:
-                    next_target = resistances[1]
-                    scenario = f"\n🟢 السيناريو الأقرب:\nاختراق المقاومة: ${nearest_resistance:.2f}\n🎯 الهدف التالي: ${next_target:.2f}\n"
-                else:
-                    scenario = f"\n🟢 السيناريو الأقرب:\nاختراق المقاومة: ${nearest_resistance:.2f}\n🎯 قد يستهدف السهم مستويات أعلى.\n"
-            elif trend == "🔴 هابط":
-                if len(supports) > 1:
-                    next_target = supports[1]
-                    scenario = f"\n🔴 السيناريو الأقرب:\nكسر الدعم: ${nearest_support:.2f}\n🎯 الهدف التالي: ${next_target:.2f}\n"
-                else:
-                    scenario = f"\n🔴 السيناريو الأقرب:\nكسر الدعم: ${nearest_support:.2f}\n🎯 قد يبحث السهم عن دعم أدنى.\n"
-            else:
-                if resistance_distance < abs(support_distance):
-                    scenario = f"\n🟡 السيناريو الأقرب:\n🚧 المقاومة: ${nearest_resistance:.2f}\n🛡️ الدعم: ${nearest_support:.2f}\nراقب الاختراق أو الكسر قبل اتخاذ القرار.\n"
-                else:
-                    scenario = f"\n🟡 السيناريو الأقرب:\n🛡️ الدعم: ${nearest_support:.2f}\n🚧 المقاومة: ${nearest_resistance:.2f}\nراقب الارتداد أو الكسر قبل اتخاذ القرار.\n"
-        else:
-            scenario = "\n🟡 لا يوجد مستوى واضح كافٍ لتحديد السيناريو القادم.\n"
-
-        # جلب بيانات الأوبشن والأرباح
-        options_and_earnings_text = get_options_and_earnings(symbol, price, supports, resistances)
+        # الأوبشن متضمن داخل التحليل
+        options_text = get_options_data(ticker, price)
 
         return f"""
-📊 تحليل {symbol}
+📊 تحليل السهم: {symbol}
 
 ━━━━━━━━━━━━━━━━━━
 💰 السعر: ${price:.2f}
@@ -303,12 +198,10 @@ def analyze_stock(symbol):
 🚧 المقاومات:
 {resistance_text}
 ━━━━━━━━━━━━━━━━━━
-{scenario}
-━━━━━━━━━━━━━━━━━━
 🔔 الإشارة: {final_signal}
 ⭐ القوة: {score}/5
 ━━━━━━━━━━━━━━━━━━
-{options_and_earnings_text}
+{options_text}
 ━━━━━━━━━━━━━━━━━━
 ⚠️ تحليل آلي وليس توصية مالية.
 """
@@ -317,25 +210,47 @@ def analyze_stock(symbol):
         return None
 
 # ============================================================
-# أوامر بوت تيليجرام
+# معالج الرسائل الموجه حسب الشروط المطلوبة
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "أهلاً بك! البوت جاهز الآن مع ميزات الأوبشن والأرباح. أرسل لي رمز السهم (مثل AAPL أو TSLA):"
+        "أهلاً بك! استخدم الأوامر التالية:\n"
+        "• أرسل **رمز السهم فقط** (مثل `AAPL`) لتحليل السهم مع الأوبشن.\n"
+        "• أرسل **رمز السهم + E** (مثل `AAPL E`) لعرض أرباح الشركة (آخر 4 أرباع والموعد القادم).\n"
+        "• أرسل **رمز السهم + N** (مثل `AAPL N`) لعرض ملاحظة الأرباح المختصرة."
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    symbol = update.message.text.strip()
+    text = update.message.text.strip().upper()
     
-    wait_msg = await update.message.reply_text(f"🔍 جاري جلب وتحليل بيانات السهم `{symbol}` مع الأرباح والأوبشن...")
-
-    result = analyze_stock(symbol)
-    
-    if result:
+    # 1. إذا انتهى بـ E (أرباح الشركة الشاملة: اسم السهم + E)
+    if text.endswith("E") and len(text) > 1:
+        symbol = text[:-1].strip()
+        wait_msg = await update.message.reply_text(f"⏳ جاري جلب بيانات أرباح الشركة `{symbol}`...")
+        result = get_earnings_full(symbol)
         await wait_msg.edit_text(result)
+        
+    # 2. إذا انتهى بـ N (أرباح الشركة المختصرة: اسم السهم + N)
+    elif text.endswith("N") and len(text) > 1:
+        symbol = text[:-1].strip()
+        wait_msg = await update.message.reply_text(f"⏳ جاري جلب ملخص أرباح `{symbol}`...")
+        result = get_earnings_note(symbol)
+        await wait_msg.edit_text(result)
+        
+    # 3. إذا كان اسم السهم العادي فقط (تحليل الأسهم + الأوبشن)
+    elif text.isalpha() and len(text) <= 5:
+        symbol = text
+        wait_msg = await update.message.reply_text(f"🔍 جاري تحليل السهم `{symbol}` مع عقود الخيارات...")
+        result = analyze_stock(symbol)
+        if result:
+            await wait_msg.edit_text(result)
+        else:
+            await wait_msg.edit_text(f"❌ عذراً، لم أتمكن من العثور على بيانات للسهم `{symbol}` أو الرمز غير صحيح.")
+            
+    # 4. غير ذلك (يتم تجاهله أو تنبيه المستخدم)
     else:
-        await wait_msg.edit_text(f"❌ عذراً، لم أتمكن من العثور على بيانات للسهم `{symbol}` أو أن الرمز غير صحيح.")
+        await update.message.reply_text("⚠️ صيغة غير صحيحة.\n• للتحليل + الأوبشن: أرسل رمز السهم فقط (مثل `AAPL`).\n• للأرباح: أرسل الرمز متبوعاً بحرف E (مثل `AAPL E`).\n• للملاحظات: أرسل الرمز متبوعاً بحرف N (مثل `AAPL N`).")
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -343,7 +258,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    print("🤖 البوت يعمل بكامل ميزاته الآن...")
+    print("🤖 البوت يعمل بالصيغ المحددة بنجاح...")
     app.run_polling()
 
 if __name__ == "__main__":
