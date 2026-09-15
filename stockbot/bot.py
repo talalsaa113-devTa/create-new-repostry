@@ -44,8 +44,85 @@ def get_support_resistance(data, current_price):
     
     return supports, resistances
 
-def get_options(symbol, price, supports, resistances):
-    return "📊 خيارات العقود: غير متوفرة حالياً أو تتطلب تفعيل بيانات متقدمة."
+def get_options_and_earnings(symbol, price, supports, resistances):
+    try:
+        ticker = yf.Ticker(symbol)
+        
+        # --- 1. خيارات الأوبشن (Call / Put) ---
+        options_dates = ticker.options
+        options_text = ""
+        if options_dates:
+            # أخذ أقرب تاريخ استحقاق متوفر
+            expiry = options_dates[0]
+            opt_chain = ticker.option_chain(expiry)
+            calls = opt_chain.calls
+            puts = opt_chain.puts
+            
+            # اختيار عقد Call قريب من السعر (أقرب Strike أعلى من السعر الحالي)
+            itm_calls = calls[calls['strike'] > price]
+            if not itm_calls.empty:
+                best_call = itm_calls.iloc[0]
+                call_text = f"🟢 Call | Strike: ${best_call['strike']} | Ask: ${best_call.get('ask', 0)}"
+            else:
+                call_text = "🟢 Call | غير متوفر حالياً"
+                
+            # اختيار عقد Put قريب من السعر (أقرب Strike أقل من السعر الحالي)
+            itm_puts = puts[puts['strike'] < price]
+            if not itm_puts.empty:
+                best_put = itm_puts.iloc[-1]
+                put_text = f"🔴 Put | Strike: ${best_put['strike']} | Ask: ${best_put.get('ask', 0)}"
+            else:
+                put_text = "🔴 Put | غير متوفر حالياً"
+                
+            options_text = f"📊 **عقود الخيارات (تاريخ: {expiry}):**\n{call_text}\n{put_text}"
+        else:
+            options_text = "📊 عقود الخيارات: غير متوفرة لهذا السهم حالياً."
+
+        # --- 2. أرباح الشركة (آخر 4 أرباع وموعد الإعلان القادم) ---
+        earnings_text = ""
+        calendar = ticker.calendar
+        next_earnings_date = "غير متوفر"
+        
+        if calendar is not None and not isinstance(calendar, dict):
+            # محاولة استخراج تاريخ الأرباح القادم إذا وُجد في الجدول
+            try:
+                if 'Earnings Date' in calendar:
+                    dates = calendar['Earnings Date']
+                    if len(dates) > 0:
+                        next_earnings_date = str(dates[0]).split()[0]
+            except:
+                pass
+        elif isinstance(calendar, dict):
+            if 'Earnings Date' in calendar:
+                dates = calendar['Earnings Date']
+                if len(dates) > 0:
+                    next_earnings_date = str(dates[0]).split()[0]
+
+        # جلب تاريخ آخر الأرباح (Quarterly Earnings)
+        q_earnings = ticker.quarterly_earnings
+        earnings_history = ""
+        if q_earnings is not None and not q_earnings.empty:
+            last_4 = q_earnings.tail(4)
+            earnings_history = "📈 **آخر أرباح للشركة (آخر 4 أرباع):**\n"
+            for idx, row in last_4.iterrows():
+                rev = row.get('Revenue', 'N/A')
+                earn = row.get('Earnings', 'N/A')
+                # تنسيق الأرقام بشكل مبسط إن وجدت
+                earnings_history += f"• {str(idx)[:10]} | الإيرادات: {rev:,} $\n" if isinstance(rev, (int, float)) else f"• {str(idx)[:10]} | البيانات متاحة\n"
+        else:
+            earnings_history = "📈 آخر أرباح للشركة: غير متوفرة حالياً."
+
+        full_extra_info = f"""
+{options_text}
+
+📅 **موعد الأرباح القادم:** {next_earnings_date}
+
+{earnings_history}
+"""
+        return full_extra_info
+    except Exception as e:
+        logger.error(f"Error fetching options/earnings for {symbol}: {e}")
+        return "📊 بيانات الخيارات والأرباح غير متاحة مؤقتاً."
 
 # ============================================================
 # دالة تحليل السهم - شاملة
@@ -201,7 +278,8 @@ def analyze_stock(symbol):
         else:
             scenario = "\n🟡 لا يوجد مستوى واضح كافٍ لتحديد السيناريو القادم.\n"
 
-        options_text = get_options(symbol, price, supports, resistances)
+        # جلب بيانات الأوبشن والأرباح
+        options_and_earnings_text = get_options_and_earnings(symbol, price, supports, resistances)
 
         return f"""
 📊 تحليل {symbol}
@@ -230,7 +308,7 @@ def analyze_stock(symbol):
 🔔 الإشارة: {final_signal}
 ⭐ القوة: {score}/5
 ━━━━━━━━━━━━━━━━━━
-{options_text}
+{options_and_earnings_text}
 ━━━━━━━━━━━━━━━━━━
 ⚠️ تحليل آلي وليس توصية مالية.
 """
@@ -244,14 +322,13 @@ def analyze_stock(symbol):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "أهلاً بك! البوت جاهز الآن. أرسل لي رمز أي سهم (مثل AAPL أو TSLA) وسأقوم بتحليله لك فوراً."
+        "أهلاً بك! البوت جاهز الآن مع ميزات الأوبشن والأرباح. أرسل لي رمز السهم (مثل AAPL أو TSLA):"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = update.message.text.strip()
     
-    # رسالة مؤقتة لتوضيح أن البوت يعمل
-    wait_msg = await update.message.reply_text(f"🔍 جاري جلب وتحليل بيانات السهم `{symbol}`...")
+    wait_msg = await update.message.reply_text(f"🔍 جاري جلب وتحليل بيانات السهم `{symbol}` مع الأرباح والأوبشن...")
 
     result = analyze_stock(symbol)
     
@@ -266,7 +343,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    print("🤖 البوت يعمل الآن ويستمع للرسائل بنجاح...")
+    print("🤖 البوت يعمل بكامل ميزاته الآن...")
     app.run_polling()
 
 if __name__ == "__main__":
